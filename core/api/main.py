@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import pandas as pd
 import sys
 from pathlib import Path
@@ -8,20 +8,22 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from predict import ModelPredictor
+from integrated_optimizer import IntegratedRouteOptimizer
 
 
 app = FastAPI(
-    title="Delivery Route Optimization and Delay Prediction System",
-    description="Delivery Route Optimization and Delay Prediction System",
-    version="1.0.0"
+    title="Fleet Management & Route Optimization API",
+    description="AI-Driven Route Optimization and Delay Prediction System",
+    version="2.0.0"
 )
 
 predictor = None
+optimizer = None
 
 
 @app.on_event("startup")
 async def startup_event():
-    global predictor
+    global predictor, optimizer
     try:
         models_dir = Path(__file__).parent.parent / "outputs" / "models"
         preprocessor_dir = Path(__file__).parent.parent / "outputs" / "preprocessor"
@@ -31,7 +33,13 @@ async def startup_event():
             preprocessor_dir=str(preprocessor_dir)
         )
         predictor.load_all_models()
-        print("Models loaded successfully!")
+        
+        optimizer = IntegratedRouteOptimizer(
+            models_dir=str(models_dir),
+            preprocessor_dir=str(preprocessor_dir)
+        )
+        
+        print("Models and optimizer loaded successfully!")
     except Exception as e:
         print(f"Warning: Could not load models: {e}")
         print("Run training first: python main.py")
@@ -166,5 +174,101 @@ async def list_models():
     
     return {
         "models": list(predictor.models.keys()),
+        "optimizer_ready": optimizer is not None,
         "status": "Models loaded successfully"
+    }
+
+
+@app.post("/optimize/routes")
+async def optimize_routes(request: PredictionRequest):
+    if optimizer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Optimizer not loaded. Please run training first."
+        )
+    
+    try:
+        stops_data = [stop.dict() for stop in request.stops]
+        df = pd.DataFrame(stops_data)
+        
+        result = optimizer.predict_and_optimize(df, time_limit=30)
+        
+        if result is None:
+            raise HTTPException(status_code=500, detail="Optimization failed")
+        
+        return {
+            "solution": result['solution'],
+            "num_reassignments": len(result['reassignments']),
+            "reassignments": result['reassignments'][:20]
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reassign/stops")
+async def reassign_stops(request: PredictionRequest, delay_threshold: float = 0.7):
+    if optimizer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Optimizer not loaded. Please run training first."
+        )
+    
+    try:
+        stops_data = [stop.dict() for stop in request.stops]
+        df = pd.DataFrame(stops_data)
+        
+        predictions = predictor.predict_route_delays(df)
+        
+        available_drivers = df['driver_id'].unique().tolist()
+        
+        routes_reassigned, reassignments = optimizer.reassignment.reassign_stops(
+            df,
+            predictions,
+            available_drivers
+        )
+        
+        return {
+            "num_reassignments": len(reassignments),
+            "reassignments": reassignments,
+            "message": f"Identified {len(reassignments)} reassignment opportunities"
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/realtime/adjust")
+async def realtime_adjustment(
+    current_routes: List[StopData],
+    live_delays: List[Dict[str, Any]]
+):
+    if optimizer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Optimizer not loaded."
+        )
+    
+    try:
+        current_df = pd.DataFrame([stop.dict() for stop in current_routes])
+        delays_df = pd.DataFrame(live_delays)
+        
+        adjusted_solution = optimizer.real_time_adjustment(current_df, delays_df)
+        
+        return {
+            "adjusted_routes": adjusted_solution,
+            "message": "Routes adjusted based on live delays"
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/optimization/status")
+async def optimization_status():
+    return {
+        "predictor_loaded": predictor is not None,
+        "optimizer_loaded": optimizer is not None,
+        "available_models": list(predictor.models.keys()) if predictor else [],
+        "optimization_ready": optimizer is not None
     }

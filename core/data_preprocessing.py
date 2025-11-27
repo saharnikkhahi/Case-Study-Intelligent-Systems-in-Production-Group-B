@@ -16,26 +16,36 @@ class DataPreprocessor:
     def load_data(self):
         df = pd.read_csv(self.data_path)
         
+        if 'actual_arrival_delay' in df.columns:
+            df['actual_arrival_delay'] = df['actual_arrival_delay'] * 24 * 60
+        
         time_cols = ["arrived_time", "earliest_time", "latest_time"]
         for col in time_cols:
-            if df[col].dtype == 'object':
-                df[col] = pd.to_datetime(df[col], errors="coerce")
+            if col in df.columns:
+                if df[col].dtype == 'object':
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+                elif df[col].dtype in ['float64', 'int64']:
+                    df[col] = pd.to_datetime(df[col], unit='s', errors="coerce")
         
         return df
     
     def create_features(self, df):
         df = df.copy()
         
+        if 'actual_arrival_delay' in df.columns and 'delay_flag' in df.columns:
+            df["delay_minutes"] = np.maximum(0, df["actual_arrival_delay"])
+            df["delayed_flag"] = df["delay_flag"]
+        else:
+            df["delay_minutes"] = np.maximum(
+                0, 
+                (pd.to_datetime(df["arrived_time"]) - pd.to_datetime(df["latest_time"])).dt.total_seconds() / 60
+            )
+            df["delayed_flag"] = (df["delay_minutes"] > 0).astype(int)
+        
         df["hour_of_arrival"] = pd.to_datetime(df["arrived_time"]).dt.hour
         df["time_window_length"] = (
             pd.to_datetime(df["latest_time"]) - pd.to_datetime(df["earliest_time"])
         ).dt.total_seconds() / 60
-        
-        df["delay_minutes"] = np.maximum(
-            0, 
-            (pd.to_datetime(df["arrived_time"]) - pd.to_datetime(df["latest_time"])).dt.total_seconds() / 60
-        )
-        df["delayed_flag"] = (df["delay_minutes"] > 0).astype(int)
         
         df["delay_ratio"] = df["delay_minutes"] / (df["time_window_length"] + 1e-6)
         
